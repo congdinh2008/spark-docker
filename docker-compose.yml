@@ -1,0 +1,91 @@
+services:
+  spark-master:
+    image: bitnami/spark:3.5.0
+    container_name: spark-master
+    environment:
+      - SPARK_MODE=master
+      - SPARK_RPC_AUTHENTICATION_ENABLED=no
+      - SPARK_RPC_ENCRYPTION_ENABLED=no
+      - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
+      - SPARK_SSL_ENABLED=no
+    ports:
+      - "8080:8080"   # Master UI
+      - "7077:7077"   # Master RPC
+    volumes:
+      - ./apps:/opt/bitnami/spark/apps
+      - ./data:/opt/bitnami/spark/data
+      - ./events:/events
+      # Mount đúng file config; tránh mount cả thư mục conf gây lỗi ROFS
+      - ./conf/spark-defaults.conf:/opt/bitnami/spark/conf/spark-defaults.conf:ro
+      - ./conf/log4j2.properties:/opt/bitnami/spark/conf/log4j2.properties:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "bash", "-lc", "curl -fsS http://localhost:8080 >/dev/null"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  spark-worker:
+    image: bitnami/spark:3.5.0
+    container_name: spark-worker
+    depends_on: [spark-master]
+    environment:
+      - SPARK_MODE=worker
+      - SPARK_MASTER_URL=spark://spark-master:7077
+      - SPARK_WORKER_MEMORY=2G
+      - SPARK_WORKER_CORES=2
+      - SPARK_RPC_AUTHENTICATION_ENABLED=no
+      - SPARK_RPC_ENCRYPTION_ENABLED=no
+      - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
+      - SPARK_SSL_ENABLED=no
+    ports:
+      - "8081:8081"   # Worker UI
+    volumes:
+      - ./apps:/opt/bitnami/spark/apps
+      - ./data:/opt/bitnami/spark/data
+      - ./events:/events
+      - ./conf/spark-defaults.conf:/opt/bitnami/spark/conf/spark-defaults.conf:ro
+    restart: unless-stopped
+
+  spark-history-server:
+    image: bitnami/spark:3.5.0
+    container_name: spark-history-server
+    command: >
+      /opt/bitnami/spark/sbin/start-history-server.sh
+    depends_on: [spark-master]
+    environment:
+      - SPARK_MODE=history-server
+      # Trỏ thẳng vào thư mục events chung
+      - SPARK_HISTORY_OPTS=-Dspark.history.fs.logDirectory=file:///events -Dspark.history.fs.update.interval=10s
+    ports:
+      - "18080:18080" # History UI
+    volumes:
+      - ./events:/events:ro
+    restart: unless-stopped
+
+  jupyter-lab:
+    image: jupyter/pyspark-notebook:spark-3.5.0
+    container_name: jupyter-lab
+    depends_on: [spark-master, spark-worker]
+    ports:
+      - "8888:8888"
+      # Cố định cổng driver & blockManager cho chế độ client trong Docker
+      - "7078:7078"
+      - "7079:7079"
+    environment:
+      - JUPYTER_ENABLE_LAB=yes
+      - JUPYTER_TOKEN=your_token_here
+      # Khai báo master + cổng driver cố định + blockManager
+      - PYSPARK_SUBMIT_ARGS=--master spark://spark-master:7077 --conf spark.driver.bindAddress=0.0.0.0 --conf spark.driver.host=jupyter-lab --conf spark.driver.port=7078 --conf spark.blockManager.port=7079 pyspark-shell
+      # Nếu muốn đẩy thêm mặc định khác qua spark-defaults từ Jupyter:
+      - SPARK_CONF_DIR=/home/jovyan/spark-conf
+    volumes:
+      - ./notebooks:/home/jovyan/work
+      - ./data:/home/jovyan/data
+      - ./events:/events
+      - ./conf/spark-defaults.client.conf:/home/jovyan/spark-conf/spark-defaults.conf:ro
+    restart: unless-stopped
+
+networks:
+  default:
+    name: spark-jupyter-net

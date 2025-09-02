@@ -1,0 +1,8 @@
+# Keep images clean
+.git
+.gitignore
+Dockerfile
+secrets/*
+*.jceks
+*.key
+*.pem

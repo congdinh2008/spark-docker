@@ -1,0 +1,15 @@
+# Secrets & creds
+secrets/
+.env
+*.jceks
+*.key
+*.pem
+
+# Local junk
+*.iml
+*.log
+.DS_Store
+**/events/
+__pycache__/
+.ipynb_checkpoints/
+.vscode/
