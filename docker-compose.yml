@@ -4,88 +4,152 @@ services:
     container_name: spark-master
     environment:
       - SPARK_MODE=master
-      - SPARK_RPC_AUTHENTICATION_ENABLED=no
-      - SPARK_RPC_ENCRYPTION_ENABLED=no
-      - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
-      - SPARK_SSL_ENABLED=no
+      - SPARK_RPC_AUTHENTICATION_ENABLED=${SPARK_AUTHENTICATION_ENABLED:-no}
+      - SPARK_RPC_ENCRYPTION_ENABLED=${SPARK_ENCRYPTION_ENABLED:-no}
+      - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=${SPARK_ENCRYPTION_ENABLED:-no}
+      - SPARK_SSL_ENABLED=${SPARK_SSL_ENABLED:-no}
+      - SPARK_MASTER_MEMORY=${SPARK_DAEMON_MEMORY:-1g}
+      - SPARK_MASTER_OPTS=-Dspark.deploy.recoveryMode=NONE
     ports:
-      - "8080:8080"   # Master UI
-      - "7077:7077"   # Master RPC
+      - "${SPARK_MASTER_WEBUI_PORT:-8080}:8080"   # Master UI
+      - "${SPARK_MASTER_PORT:-7077}:7077"   # Master RPC
+    networks: 
+      - spark-net
     volumes:
-      - ./apps:/opt/bitnami/spark/apps
+      - ./apps:/opt/bitnami/spark/apps:ro
       - ./data:/opt/bitnami/spark/data
       - ./events:/events
-      # Mount đúng file config; tránh mount cả thư mục conf gây lỗi ROFS
       - ./conf/spark-defaults.conf:/opt/bitnami/spark/conf/spark-defaults.conf:ro
       - ./conf/log4j2.properties:/opt/bitnami/spark/conf/log4j2.properties:ro
+      - ./conf/metrics.properties:/opt/bitnami/spark/conf/metrics.properties:ro
+      - spark-recovery:/tmp/spark-recovery
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "bash", "-lc", "curl -fsS http://localhost:8080 >/dev/null"]
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/localhost/8080 && echo -e 'GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3 && head -1 <&3 | grep -q '200 OK'"]
       interval: 10s
-      timeout: 3s
-      retries: 10
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
   spark-worker:
     image: bitnami/spark:3.5.0
-    container_name: spark-worker
-    depends_on: [spark-master]
+    depends_on:
+      spark-master:
+        condition: service_healthy
     environment:
       - SPARK_MODE=worker
-      - SPARK_MASTER_URL=spark://spark-master:7077
-      - SPARK_WORKER_MEMORY=2G
-      - SPARK_WORKER_CORES=2
-      - SPARK_RPC_AUTHENTICATION_ENABLED=no
-      - SPARK_RPC_ENCRYPTION_ENABLED=no
-      - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
-      - SPARK_SSL_ENABLED=no
-    ports:
-      - "8081:8081"   # Worker UI
+      - SPARK_MASTER_URL=spark://spark-master:${SPARK_MASTER_PORT:-7077}
+      - SPARK_WORKER_MEMORY=${SPARK_WORKER_MEMORY:-2G}
+      - SPARK_WORKER_CORES=${SPARK_WORKER_CORES:-2}
+      - SPARK_WORKER_INSTANCES=1
+      - SPARK_RPC_AUTHENTICATION_ENABLED=${SPARK_AUTHENTICATION_ENABLED:-no}
+      - SPARK_RPC_ENCRYPTION_ENABLED=${SPARK_ENCRYPTION_ENABLED:-no}
+      - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=${SPARK_ENCRYPTION_ENABLED:-no}
+      - SPARK_SSL_ENABLED=${SPARK_SSL_ENABLED:-no}
+      - SPARK_WORKER_OPTS=-Dspark.worker.cleanup.enabled=true -Dspark.worker.cleanup.interval=1800
+    deploy:
+      replicas: ${SPARK_WORKER_REPLICAS:-1}
+      resources:
+        limits:
+          memory: ${SPARK_WORKER_MEMORY:-2G}
+          cpus: '${SPARK_WORKER_CORES:-2}'
+        reservations:
+          memory: 1G
+          cpus: '1'
+    networks: 
+      - spark-net
     volumes:
-      - ./apps:/opt/bitnami/spark/apps
+      - ./apps:/opt/bitnami/spark/apps:ro
       - ./data:/opt/bitnami/spark/data
       - ./events:/events
       - ./conf/spark-defaults.conf:/opt/bitnami/spark/conf/spark-defaults.conf:ro
+      - ./conf/log4j2.properties:/opt/bitnami/spark/conf/log4j2.properties:ro
+      - ./conf/metrics.properties:/opt/bitnami/spark/conf/metrics.properties:ro
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/localhost/8081 && echo -e 'GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3 && head -1 <&3 | grep -q '200 OK'"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 45s
 
   spark-history-server:
     image: bitnami/spark:3.5.0
     container_name: spark-history-server
     command: >
-      /opt/bitnami/spark/sbin/start-history-server.sh
-    depends_on: [spark-master]
+      bash -c "
+      export SPARK_HISTORY_OPTS='-Dspark.history.fs.logDirectory=file:///events -Dspark.history.fs.update.interval=10s -Dspark.history.ui.maxApplications=100 -Dspark.history.retainedApplications=50 -Dspark.history.ui.port=18080';
+      /opt/bitnami/spark/sbin/start-history-server.sh;
+      tail -f /dev/null
+      "
+    depends_on:
+      spark-master:
+        condition: service_healthy
     environment:
-      - SPARK_MODE=history-server
-      # Trỏ thẳng vào thư mục events chung
-      - SPARK_HISTORY_OPTS=-Dspark.history.fs.logDirectory=file:///events -Dspark.history.fs.update.interval=10s
+      - SPARK_NO_DAEMONIZE=true
+      - SPARK_HISTORY_SERVER_MEMORY=${SPARK_DAEMON_MEMORY:-1g}
     ports:
-      - "18080:18080" # History UI
+      - "${SPARK_HISTORY_SERVER_PORT:-18080}:18080"  # History Server UI
+    networks: 
+      - spark-net
     volumes:
       - ./events:/events:ro
+      - ./conf/log4j2.properties:/opt/bitnami/spark/conf/log4j2.properties:ro
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/localhost/18080 && echo -e 'GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3 && head -1 <&3 | grep -q '200 OK'"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
 
   jupyter-lab:
     image: jupyter/pyspark-notebook:spark-3.5.0
     container_name: jupyter-lab
-    depends_on: [spark-master, spark-worker]
+    depends_on:
+      spark-master:
+        condition: service_healthy
+      spark-worker:
+        condition: service_healthy
     ports:
-      - "8888:8888"
-      # Cố định cổng driver & blockManager cho chế độ client trong Docker
-      - "7078:7078"
-      - "7079:7079"
+      - "${JUPYTER_PORT:-8888}:8888"
+      - "${SPARK_DRIVER_PORT:-7078}:7078"
+      - "${SPARK_BLOCK_MANAGER_PORT:-7079}:7079"
+    networks: 
+      - spark-net
     environment:
       - JUPYTER_ENABLE_LAB=yes
-      - JUPYTER_TOKEN=your_token_here
-      # Khai báo master + cổng driver cố định + blockManager
-      - PYSPARK_SUBMIT_ARGS=--master spark://spark-master:7077 --conf spark.driver.bindAddress=0.0.0.0 --conf spark.driver.host=jupyter-lab --conf spark.driver.port=7078 --conf spark.blockManager.port=7079 pyspark-shell
-      # Nếu muốn đẩy thêm mặc định khác qua spark-defaults từ Jupyter:
+      - JUPYTER_TOKEN=${JUPYTER_TOKEN:-}
+      - GRANT_SUDO=yes
+      - NB_UID=1000
+      - NB_GID=1000
+      # Spark configuration
+      - PYSPARK_SUBMIT_ARGS=--master spark://spark-master:7077 --conf spark.driver.bindAddress=0.0.0.0 --conf spark.driver.host=jupyter-lab --conf spark.driver.port=${SPARK_DRIVER_PORT:-7078} --conf spark.blockManager.port=${SPARK_BLOCK_MANAGER_PORT:-7079} --conf spark.executor.memory=${SPARK_EXECUTOR_MEMORY:-2g} --conf spark.executor.cores=${SPARK_EXECUTOR_CORES:-1} --conf spark.driver.memory=${SPARK_DRIVER_MEMORY:-1g} pyspark-shell
       - SPARK_CONF_DIR=/home/jovyan/spark-conf
+      # JupyterLab performance
+      - JUPYTER_CONFIG_DIR=/home/jovyan/.jupyter
+    user: "1000:1000"
     volumes:
       - ./notebooks:/home/jovyan/work
       - ./data:/home/jovyan/data
       - ./events:/events
       - ./conf/spark-defaults.client.conf:/home/jovyan/spark-conf/spark-defaults.conf:ro
+      - ./conf/log4j2.properties:/home/jovyan/spark-conf/log4j2.properties:ro
+      - jupyter-home:/home/jovyan
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/localhost/8888 && echo -e 'GET /lab HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3 && head -1 <&3 | grep -E '(200 OK|302 Found)'"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
 
 networks:
-  default:
-    name: spark-jupyter-net
+  spark-net:
+    name: spark-net
+
+volumes:
+  spark-recovery:
+    driver: local
+  jupyter-home:
+    driver: local
